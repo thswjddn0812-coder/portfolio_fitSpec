@@ -1,12 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThanOrEqual } from 'typeorm';
+import { Repository, LessThanOrEqual, DataSource } from 'typeorm';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { Members } from './entities/member.entity';
 import { Gyms } from '../gyms/entities/gym.entity';
 import { EvaluationStandards } from '../evaluation-standards/entities/evaluation-standard.entity';
 import { AgeCoefficients } from '../age-coefficients/entities/age-coefficient.entity';
+import { TestCategories } from '../test_categories/entities/test_category.entity';
+import { PhysicalRecords } from '../physical_records/entities/physical_record.entity';
+import { CalculateMeasurementsDto } from './dto/calculate-measurements.dto';
 
 @Injectable()
 export class MembersService {
@@ -19,6 +22,11 @@ export class MembersService {
     private evaluationStandardsRepository: Repository<EvaluationStandards>,
     @InjectRepository(AgeCoefficients)
     private ageCoefficientsRepository: Repository<AgeCoefficients>,
+    @InjectRepository(TestCategories)
+    private testCategoriesRepository: Repository<TestCategories>,
+    @InjectRepository(PhysicalRecords)
+    private physicalRecordsRepository: Repository<PhysicalRecords>,
+    private dataSource: DataSource,
   ) {}
 
   async create(gymId: number, createMemberDto: CreateMemberDto) {
@@ -238,5 +246,273 @@ export class MembersService {
       nextLevelTarget: nextLevelTarget || 0,
       remaining: Math.round(remaining * 100) / 100, // 소수점 2자리까지
     };
+  }
+
+  /**
+   * 나이 계수를 찾는 헬퍼 메서드 (가장 가까운 나이)
+   */
+  private async findNearestAgeCoefficient(
+    gender: 'M' | 'F',
+    age: number,
+  ): Promise<AgeCoefficients> {
+    // 아래 나이 중 가장 큰 값
+    const lowerAge = await this.ageCoefficientsRepository
+      .createQueryBuilder('ac')
+      .where('ac.gender = :gender', { gender })
+      .andWhere('ac.age <= :age', { age })
+      .orderBy('ac.age', 'DESC')
+      .getOne();
+
+    // 위 나이 중 가장 작은 값
+    const upperAge = await this.ageCoefficientsRepository
+      .createQueryBuilder('ac')
+      .where('ac.gender = :gender', { gender })
+      .andWhere('ac.age > :age', { age })
+      .orderBy('ac.age', 'ASC')
+      .getOne();
+
+    // 가장 가까운 나이 선택
+    if (!lowerAge && !upperAge) {
+      throw new NotFoundException(
+        `해당 조건(gender: ${gender}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
+      );
+    }
+
+    if (!lowerAge) return upperAge!;
+    if (!upperAge) return lowerAge;
+
+    const lowerDiff = age - lowerAge.age;
+    const upperDiff = upperAge.age - age;
+
+    return lowerDiff <= upperDiff ? lowerAge : upperAge;
+  }
+
+  /**
+   * 등급에 따른 점수 반환
+   */
+  private getScoreByLevel(level: string): number {
+    const levelScoreMap: Record<string, number> = {
+      Beginner: 1,
+      Novice: 2,
+      Intermediate: 3,
+      Advanced: 4,
+      Elite: 5,
+    };
+    return levelScoreMap[level] || 1;
+  }
+
+  /**
+   * 평균 점수에 따른 전체 등급 반환
+   */
+  private getOverallLevelByAverageScore(averageScore: number): string {
+    if (averageScore >= 4.5) return 'Elite';
+    if (averageScore >= 3.5) return 'Advanced';
+    if (averageScore >= 2.5) return 'Intermediate';
+    if (averageScore >= 1.5) return 'Novice';
+    return 'Beginner';
+  }
+
+  /**
+   * 전체 등급에 따른 설명 반환
+   */
+  private getDescriptionByLevel(level: string): string {
+    const descriptions: Record<string, string> = {
+      Beginner: '초보자 수준입니다. 꾸준한 운동으로 실력을 향상시켜보세요.',
+      Novice: '초급자 수준입니다. 더 높은 목표를 향해 도전해보세요.',
+      Intermediate: '중급자 수준입니다. 좋은 실력입니다.',
+      Advanced: '고급자 수준입니다. 훌륭한 실력입니다.',
+      Elite: '엘리트 수준입니다. 최고의 실력입니다.',
+    };
+    return descriptions[level] || descriptions['Beginner'];
+  }
+
+  /**
+   * 체력 측정 결과 처리 및 등급 계산
+   */
+  async calculateAndSaveMeasurements(
+    gymId: number,
+    dto: CalculateMeasurementsDto,
+  ): Promise<{
+    totalSummary: {
+      overallLevel: string;
+      averageScore: number;
+      description: string;
+    };
+    results: Array<{
+      categoryId: number;
+      exerciseName: string;
+      value: number;
+      unit: string;
+      level: string;
+      score: number;
+      nextLevel: string;
+      nextLevelTarget: number;
+      remaining: number;
+    }>;
+  }> {
+    // 1. 회원 정보 조회
+    const member = await this.membersRepository.findOne({
+      where: { id: dto.memberId, gym: { id: gymId } },
+    });
+
+    if (!member) {
+      throw new NotFoundException(`헬스장 ID ${gymId}에 속한 회원 ID ${dto.memberId}를 찾을 수 없습니다.`);
+    }
+
+    const gender = member.gender;
+    const age = member.age;
+    const bodyWeight = parseFloat(member.weight);
+
+    // 2. 트랜잭션 시작
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD 형식
+      const results: Array<{
+        categoryId: number;
+        exerciseName: string;
+        value: number;
+        unit: string;
+        level: string;
+        score: number;
+        nextLevel: string;
+        nextLevelTarget: number;
+        remaining: number;
+      }> = [];
+
+      // 3. 각 측정값 처리
+      for (const measurement of dto.measurements) {
+        // 카테고리 정보 조회
+        const category = await this.testCategoriesRepository.findOne({
+          where: { id: measurement.categoryId },
+        });
+
+        if (!category) {
+          throw new NotFoundException(`카테고리 ID ${measurement.categoryId}를 찾을 수 없습니다.`);
+        }
+
+        // DB에 저장
+        const physicalRecord = queryRunner.manager.create(PhysicalRecords, {
+          value: measurement.value.toString(),
+          measuredAt: today,
+          weightAtMeasured: member.weight,
+          member: member,
+          category: category,
+        });
+
+        await queryRunner.manager.save(PhysicalRecords, physicalRecord);
+
+        // 4. 등급 계산
+        // 4-1. EvaluationStandards에서 체중과 가장 가까운 내림값 찾기
+        const evaluationStandard = await queryRunner.manager
+          .createQueryBuilder(EvaluationStandards, 'es')
+          .leftJoinAndSelect('es.category', 'category')
+          .where('es.gender = :gender', { gender })
+          .andWhere('category.id = :categoryId', { categoryId: measurement.categoryId })
+          .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
+          .orderBy('es.bodyWeight', 'DESC')
+          .getOne();
+
+        if (!evaluationStandard) {
+          throw new NotFoundException(
+            `해당 조건(gender: ${gender}, categoryId: ${measurement.categoryId}, bodyWeight: ${bodyWeight})에 맞는 평가 기준을 찾을 수 없습니다.`,
+          );
+        }
+
+        // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기
+        const ageCoefficient = await this.findNearestAgeCoefficient(gender, age);
+
+        const coefficient = parseFloat(ageCoefficient.coefficient);
+
+        // 4-3. 기준치에 나이 계수 곱하기
+        const adjustedLevels = {
+          elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+          advanced: evaluationStandard.advanced
+            ? parseFloat(evaluationStandard.advanced) * coefficient
+            : null,
+          intermediate: evaluationStandard.intermediate
+            ? parseFloat(evaluationStandard.intermediate) * coefficient
+            : null,
+          novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+          beginner: evaluationStandard.beginner
+            ? parseFloat(evaluationStandard.beginner) * coefficient
+            : null,
+        };
+
+        // 4-4. 등급 판정
+        const levelOrder = [
+          { name: 'Elite', value: adjustedLevels.elite },
+          { name: 'Advanced', value: adjustedLevels.advanced },
+          { name: 'Intermediate', value: adjustedLevels.intermediate },
+          { name: 'Novice', value: adjustedLevels.novice },
+          { name: 'Beginner', value: adjustedLevels.beginner },
+        ];
+
+        let currentLevel = 'Beginner';
+        let currentIndex = levelOrder.length - 1;
+
+        for (let i = 0; i < levelOrder.length; i++) {
+          const levelValue = levelOrder[i].value;
+          if (levelValue !== null && levelValue !== undefined && measurement.value >= levelValue) {
+            currentLevel = levelOrder[i].name;
+            currentIndex = i;
+            break;
+          }
+        }
+
+        // 다음 등급 찾기
+        let nextLevel = 'Elite';
+        let nextLevelTarget: number | null = null;
+        for (let i = currentIndex - 1; i >= 0; i--) {
+          const levelValue = levelOrder[i].value;
+          if (levelValue !== null) {
+            nextLevel = levelOrder[i].name;
+            nextLevelTarget = levelValue;
+            break;
+          }
+        }
+
+        const remaining = nextLevelTarget !== null ? Math.max(0, nextLevelTarget - measurement.value) : 0;
+        const score = this.getScoreByLevel(currentLevel);
+
+        results.push({
+          categoryId: measurement.categoryId,
+          exerciseName: category.name,
+          value: measurement.value,
+          unit: category.unit,
+          level: currentLevel,
+          score: score,
+          nextLevel: nextLevel,
+          nextLevelTarget: nextLevelTarget || 0,
+          remaining: Math.round(remaining * 100) / 100,
+        });
+      }
+
+      // 트랜잭션 커밋
+      await queryRunner.commitTransaction();
+
+      // 5. 전체 요약 계산
+      const averageScore = results.reduce((sum, r) => sum + r.score, 0) / results.length;
+      const overallLevel = this.getOverallLevelByAverageScore(averageScore);
+      const description = this.getDescriptionByLevel(overallLevel);
+
+      return {
+        totalSummary: {
+          overallLevel,
+          averageScore: Math.round(averageScore * 100) / 100,
+          description,
+        },
+        results,
+      };
+    } catch (error) {
+      // 트랜잭션 롤백
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      // 쿼리 러너 해제
+      await queryRunner.release();
+    }
   }
 }

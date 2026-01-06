@@ -17,6 +17,7 @@ import { MembersService } from './members.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { CalculateStrengthLevelDto } from './dto/calculate-strength-level.dto';
+import { CalculateMeasurementsDto } from './dto/calculate-measurements.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 @Controller('members')
@@ -91,6 +92,16 @@ export class MembersController {
       dto.measuredWeight,
       dto.categoryId,
     );
+  }
+
+  /**
+   * 체력 측정 결과 처리 및 등급 계산
+   */
+  @Post('calculate-measurements')
+  @HttpCode(HttpStatus.OK)
+  calculateMeasurements(@Req() req: Request, @Body() dto: CalculateMeasurementsDto) {
+    const gymId = this.getGymId(req);
+    return this.membersService.calculateAndSaveMeasurements(gymId, dto);
   }
 
   /**

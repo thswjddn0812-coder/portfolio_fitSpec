@@ -18,7 +18,10 @@ import {
   
     @Column("date", { name: "measured_at" })
     measuredAt: string;
-  
+
+    @Column("decimal", { name: "weight_at_measured", precision: 5, scale: 2, nullable: true })
+    weightAtMeasured: string | null;
+
     @ManyToOne(() => Members, (members) => members.physicalRecords, {
       onDelete: "CASCADE",
       onUpdate: "NO ACTION",
