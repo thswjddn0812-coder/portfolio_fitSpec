@@ -7,58 +7,92 @@ import {
   Param,
   Delete,
   Query,
+  Req,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { MembersService } from './members.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 @Controller('members')
+@UseGuards(JwtAuthGuard) // 모든 엔드포인트에 JWT Guard 적용
 export class MembersController {
   constructor(private readonly membersService: MembersService) {}
 
   /**
    * 회원 생성
+   * 쿠키에서 gym_id를 읽어서 사용
    */
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() createMemberDto: CreateMemberDto) {
-    return this.membersService.create(createMemberDto);
+  create(@Req() req: Request, @Body() createMemberDto: CreateMemberDto) {
+    // 쿠키에서 gym_id 읽기 (없으면 토큰에서 sub 사용)
+    const gymId = this.getGymId(req);
+    return this.membersService.create(gymId, createMemberDto);
   }
 
   /**
    * 회원 목록 조회
-   * @param gymId - 헬스장 ID (선택사항, 없으면 전체 조회)
+   * @param name - 회원 이름 (선택사항, 이름으로 검색)
    */
   @Get()
-  findAll(@Query('gymId') gymId?: string) {
-    const gymIdNum = gymId ? parseInt(gymId) : undefined;
-    return this.membersService.findAll(gymIdNum);
+  findAll(@Req() req: Request, @Query('name') name?: string) {
+    const gymId = this.getGymId(req);
+    return this.membersService.findAll(gymId, name);
   }
 
   /**
-   * 회원 상세 조회
+   * 특정 헬스장의 회원 상세 조회
    */
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.membersService.findOne(+id);
+  findOne(@Req() req: Request, @Param('id') id: string) {
+    const gymId = this.getGymId(req);
+    return this.membersService.findOne(gymId, +id);
   }
 
   /**
-   * 회원 정보 수정
+   * 특정 헬스장의 회원 정보 수정
    */
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateMemberDto: UpdateMemberDto) {
-    return this.membersService.update(+id, updateMemberDto);
+  update(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() updateMemberDto: UpdateMemberDto,
+  ) {
+    const gymId = this.getGymId(req);
+    return this.membersService.update(gymId, +id, updateMemberDto);
   }
 
   /**
-   * 회원 삭제
+   * 특정 헬스장의 회원 삭제
    */
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
-  remove(@Param('id') id: string) {
-    return this.membersService.remove(+id);
+  remove(@Req() req: Request, @Param('id') id: string) {
+    const gymId = this.getGymId(req);
+    return this.membersService.remove(gymId, +id);
+  }
+
+  /**
+   * 쿠키 또는 토큰에서 gym_id 추출
+   */
+  private getGymId(req: Request): number {
+    // 1. 쿠키에서 gym_id 읽기
+    const cookieGymId = req.cookies?.gym_id;
+    if (cookieGymId) {
+      return parseInt(cookieGymId);
+    }
+
+    // 2. 토큰에서 sub (gym.id) 읽기
+    const user = req['user'];
+    if (user && user.sub) {
+      return user.sub;
+    }
+
+    throw new Error('gym_id를 찾을 수 없습니다. 로그인이 필요합니다.');
   }
 }

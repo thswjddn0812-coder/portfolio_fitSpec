@@ -9,10 +9,6 @@ import {
 } from 'class-validator';
 
 export class CreateMemberDto {
-  @IsNumber()
-  @IsNotEmpty()
-  gymId: number;
-
   @IsString()
   @IsNotEmpty()
   name: string;
