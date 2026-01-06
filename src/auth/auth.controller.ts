@@ -39,10 +39,14 @@ export class AuthController {
     const result = await this.authService.login(loginDto);
 
     // 리프레시 토큰을 쿠키에 저장
+    const isProduction = process.env.NODE_ENV === 'production';
     const cookieOptions: CookieOptions = {
       httpOnly: true, // JavaScript에서 접근 불가 (XSS 방지)
-      secure: process.env.NODE_ENV === 'production', // HTTPS에서만 전송
-      sameSite: 'strict', // CSRF 방지
+      secure: isProduction, // 프로덕션에서만 HTTPS 필수
+      // 개발 환경: lax로 설정 (같은 도메인의 다른 포트는 허용)
+      // 프로덕션: strict로 설정하여 보안 강화
+      // 참고: 크로스 오리진(완전히 다른 도메인)에서는 sameSite: 'none' + secure: true 필요
+      sameSite: isProduction ? 'strict' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7일
       path: '/',
     };
@@ -87,10 +91,11 @@ export class AuthController {
     }
 
     // 쿠키 삭제
+    const isProduction = process.env.NODE_ENV === 'production';
     res.clearCookie('refreshToken', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: isProduction,
+      sameSite: isProduction ? 'strict' : 'lax',
       path: '/',
     });
 
