@@ -9,6 +9,14 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   
+  // CORS 전체 허용 설정
+  app.enableCors({
+    origin: true, // 모든 origin 허용
+    credentials: true, // 쿠키 포함 요청 허용
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  });
+  
   // 쿠키 파서 설정
   app.use(cookieParser.default());
   

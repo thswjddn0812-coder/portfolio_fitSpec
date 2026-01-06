@@ -302,40 +302,49 @@ async function importData() {
       }
     }
 
-    // 배치 삽입 (중복 체크 포함)
+    // 배치 삽입 (중복 체크 포함 - 최적화된 버전)
     if (entities.length > 0) {
       try {
-        // 중복 체크: 각 entity의 정확한 조합을 확인
-        // 배치 단위로 중복 체크를 효율적으로 수행
-        const newEntities: PublicPhysicalRecords[] = [];
-        
-        // 배치를 작은 청크로 나누어 중복 체크 (너무 많은 쿼리 방지)
-        const CHECK_CHUNK_SIZE = 100;
-        for (let j = 0; j < entities.length; j += CHECK_CHUNK_SIZE) {
-          const chunk = entities.slice(j, j + CHECK_CHUNK_SIZE);
-          
-          // 청크의 각 entity에 대해 중복 체크
-          for (const entity of chunk) {
-            const existing = await dataSource
-              .getRepository(PublicPhysicalRecords)
-              .findOne({
-                where: {
-                  gender: entity.gender,
-                  age: entity.age,
-                  category: { id: entity.category.id },
-                  measuredValue: entity.measuredValue,
-                },
-              });
+        // 중복 체크: 배치 전체를 한 번에 조회 (효율적)
+        // 모든 조합을 문자열로 만들어서 Set으로 관리
+        const entityKeys = entities.map(
+          (e) => `${e.gender}|${e.age}|${e.category.id}|${e.measuredValue}`,
+        );
 
-            if (!existing) {
-              newEntities.push(entity);
-            } else {
-              duplicateCount++;
-            }
-          }
-        }
+        // 배치의 모든 조합을 한 번에 조회하기 위해 raw SQL 사용
+        const placeholders = entities
+          .map(
+            (_, idx) =>
+              `(gender = ? AND age = ? AND category_id = ? AND measured_value = ?)`,
+          )
+          .join(' OR ');
+
+        const params: any[] = [];
+        entities.forEach((e) => {
+          params.push(e.gender, e.age, e.category.id, e.measuredValue);
+        });
+
+        const existingRecords = await dataSource.query(
+          `SELECT gender, age, category_id, measured_value 
+           FROM public_physical_records 
+           WHERE ${placeholders}`,
+          params,
+        );
+
+        // 중복 체크를 위한 Set 생성
+        const existingSet = new Set(
+          existingRecords.map(
+            (r: any) => `${r.gender}|${r.age}|${r.category_id}|${r.measuredValue}`,
+          ),
+        );
+
+        // 중복되지 않은 entities만 필터링
+        const newEntities = entities.filter(
+          (entity, idx) => !existingSet.has(entityKeys[idx]),
+        );
 
         const batchDuplicateCount = entities.length - newEntities.length;
+        duplicateCount += batchDuplicateCount;
 
         // 새로운 데이터만 삽입
         if (newEntities.length > 0) {
