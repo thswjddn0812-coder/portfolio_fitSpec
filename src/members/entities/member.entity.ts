@@ -20,8 +20,8 @@ import {
     @Column("enum", { name: "gender", enum: ["M", "F"] })
     gender: "M" | "F";
   
-    @Column("date", { name: "birth_date" })
-    birthDate: string;
+    @Column("int", { name: "age" })
+    age: number;
   
     @Column("decimal", { name: "height", precision: 5, scale: 2 })
     height: string;
