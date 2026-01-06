@@ -1,0 +1,13 @@
+[
+  {
+    "name": "default",
+    "type": "mysql",
+    "host": "gateway01.ap-northeast-1.prod.aws.tidbcloud.com",
+    "port": 4000,
+    "username": "2ucAx7hsDrVb16i.root",
+    "password": "S2ZfGRnFeOqmM6nR",
+    "database": "",
+    "synchronize": false,
+    "entities": ["entities/*.js"]
+  }
+]

@@ -1,10 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, LessThanOrEqual } from 'typeorm';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { Members } from './entities/member.entity';
 import { Gyms } from '../gyms/entities/gym.entity';
+import { EvaluationStandards } from '../evaluation-standards/entities/evaluation-standard.entity';
+import { AgeCoefficients } from '../age-coefficients/entities/age-coefficient.entity';
 
 @Injectable()
 export class MembersService {
@@ -13,6 +15,10 @@ export class MembersService {
     private membersRepository: Repository<Members>,
     @InjectRepository(Gyms)
     private gymsRepository: Repository<Gyms>,
+    @InjectRepository(EvaluationStandards)
+    private evaluationStandardsRepository: Repository<EvaluationStandards>,
+    @InjectRepository(AgeCoefficients)
+    private ageCoefficientsRepository: Repository<AgeCoefficients>,
   ) {}
 
   async create(gymId: number, createMemberDto: CreateMemberDto) {
@@ -125,5 +131,112 @@ export class MembersService {
     const member = await this.findOneEntity(gymId, id);
     await this.membersRepository.remove(member);
     return { message: '회원이 삭제되었습니다.' };
+  }
+
+  /**
+   * 근력 등급 계산
+   * @param gender 성별 ('M' | 'F')
+   * @param age 나이
+   * @param bodyWeight 체중
+   * @param measuredWeight 측정된 1RM 기록
+   * @param categoryId 카테고리 ID
+   * @returns { level: string, nextLevelTarget: number, remaining: number }
+   */
+  async calculateStrengthLevel(
+    gender: 'M' | 'F',
+    age: number,
+    bodyWeight: number,
+    measuredWeight: number,
+    categoryId: number,
+  ): Promise<{ level: string; nextLevelTarget: number; remaining: number }> {
+    // Step 1: EvaluationStandards에서 해당 gender와 categoryId를 가진 행 중,
+    // bodyWeight가 입력값보다 작거나 같은 것 중 가장 큰 행을 가져오기
+    const evaluationStandard = await this.evaluationStandardsRepository
+      .createQueryBuilder('es')
+      .leftJoinAndSelect('es.category', 'category')
+      .where('es.gender = :gender', { gender })
+      .andWhere('category.id = :categoryId', { categoryId })
+      .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
+      .orderBy('es.bodyWeight', 'DESC')
+      .getOne();
+
+    if (!evaluationStandard) {
+      throw new NotFoundException(
+        `해당 조건(gender: ${gender}, categoryId: ${categoryId}, bodyWeight: ${bodyWeight})에 맞는 평가 기준을 찾을 수 없습니다.`,
+      );
+    }
+
+    // Step 2: AgeCoefficients에서 해당 gender와 age에 맞는 coefficient 가져오기
+    // 나이가 딱 맞지 않으면 가장 가까운 아래 나이 값 사용
+    const ageCoefficient = await this.ageCoefficientsRepository
+      .createQueryBuilder('ac')
+      .where('ac.gender = :gender', { gender })
+      .andWhere('ac.age <= :age', { age })
+      .orderBy('ac.age', 'DESC')
+      .getOne();
+
+    if (!ageCoefficient) {
+      throw new NotFoundException(
+        `해당 조건(gender: ${gender}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
+      );
+    }
+
+    const coefficient = parseFloat(ageCoefficient.coefficient);
+
+    // Step 3: DB에서 가져온 등급 기준값에 coefficient를 곱하기
+    const adjustedLevels = {
+      elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+      advanced: evaluationStandard.advanced
+        ? parseFloat(evaluationStandard.advanced) * coefficient
+        : null,
+      intermediate: evaluationStandard.intermediate
+        ? parseFloat(evaluationStandard.intermediate) * coefficient
+        : null,
+      novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+      beginner: evaluationStandard.beginner
+        ? parseFloat(evaluationStandard.beginner) * coefficient
+        : null,
+    };
+
+    // Step 4: 회원의 measuredWeight와 위에서 계산한 보정값들을 높은 순서(Elite부터)대로 비교
+    // 회원이 속한 최상위 등급을 반환
+    const levelOrder = [
+      { name: 'Elite', value: adjustedLevels.elite },
+      { name: 'Advanced', value: adjustedLevels.advanced },
+      { name: 'Intermediate', value: adjustedLevels.intermediate },
+      { name: 'Novice', value: adjustedLevels.novice },
+      { name: 'Beginner', value: adjustedLevels.beginner },
+    ];
+
+    let currentLevel = 'Beginner';
+    let currentIndex = levelOrder.length - 1;
+
+    // Elite부터 순서대로 체크하여 measuredWeight가 해당 등급 기준값 이상인 최상위 등급 찾기
+    for (let i = 0; i < levelOrder.length; i++) {
+      const levelValue = levelOrder[i].value;
+      if (levelValue !== null && levelValue !== undefined && measuredWeight >= levelValue) {
+        currentLevel = levelOrder[i].name;
+        currentIndex = i;
+        break;
+      }
+    }
+
+    // 다음 등급 찾기 (현재 등급보다 한 단계 위)
+    let nextLevelTarget: number | null = null;
+    for (let i = currentIndex - 1; i >= 0; i--) {
+      const levelValue = levelOrder[i].value;
+      if (levelValue !== null) {
+        nextLevelTarget = levelValue;
+        break;
+      }
+    }
+
+    const remaining = nextLevelTarget !== null ? Math.max(0, nextLevelTarget - measuredWeight) : 0;
+
+    return {
+      level: currentLevel,
+      nextLevelTarget: nextLevelTarget || 0,
+      remaining: Math.round(remaining * 100) / 100, // 소수점 2자리까지
+    };
   }
 }

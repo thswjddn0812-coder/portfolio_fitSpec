@@ -10,6 +10,7 @@ import { TestCategories } from './test_categories/entities/test_category.entity'
 import { PhysicalRecords } from './physical_records/entities/physical_record.entity';
 import { PublicPhysicalRecords } from './public_physical_records/entities/public_physical_record.entity';
 import { EvaluationStandards } from './evaluation-standards/entities/evaluation-standard.entity';
+import { AgeCoefficients } from './age-coefficients/entities/age-coefficient.entity';
 import { GymsModule } from './gyms/gyms.module';
 import { EvaluationStandardsModule } from './evaluation-standards/evaluation-standards.module';
 import { MembersModule } from './members/members.module';
@@ -18,6 +19,7 @@ import { PublicPhysicalRecordsModule } from './public_physical_records/public_ph
 import { RefreshTokensModule } from './refresh_tokens/refresh_tokens.module';
 import { TestCategoriesModule } from './test_categories/test_categories.module';
 import { AuthModule } from './auth/auth.module';
+import { AgeCoefficientsModule } from './age-coefficients/age-coefficients.module';
 
 @Module({
   imports: [
@@ -40,6 +42,7 @@ import { AuthModule } from './auth/auth.module';
         PhysicalRecords,
         PublicPhysicalRecords,
         EvaluationStandards,
+        AgeCoefficients,
       ],
       synchronize:true, // Code First 방식으로 스키마 자동 생성
       logging: true, // SQL 쿼리 로그 출력
@@ -55,6 +58,7 @@ import { AuthModule } from './auth/auth.module';
     RefreshTokensModule,
     TestCategoriesModule,
     AuthModule,
+    AgeCoefficientsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -16,6 +16,7 @@ import type { Request } from 'express';
 import { MembersService } from './members.service';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
+import { CalculateStrengthLevelDto } from './dto/calculate-strength-level.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 @Controller('members')
@@ -75,6 +76,21 @@ export class MembersController {
   remove(@Req() req: Request, @Param('id') id: string) {
     const gymId = this.getGymId(req);
     return this.membersService.remove(gymId, +id);
+  }
+
+  /**
+   * 근력 등급 계산
+   */
+  @Post('calculate-strength-level')
+  @HttpCode(HttpStatus.OK)
+  calculateStrengthLevel(@Body() dto: CalculateStrengthLevelDto) {
+    return this.membersService.calculateStrengthLevel(
+      dto.gender,
+      dto.age,
+      dto.bodyWeight,
+      dto.measuredWeight,
+      dto.categoryId,
+    );
   }
 
   /**
