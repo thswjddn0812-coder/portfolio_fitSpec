@@ -29,6 +29,14 @@ async function bootstrap() {
       transform: true, // 자동 타입 변환
     }),
   );
+
+  // CORS 설정 - 전체 허용
+  app.enableCors({
+    origin: true, // 모든 origin 허용
+    credentials: true, // 쿠키 포함 요청 허용
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  });
   
   await app.listen(3000);
   console.log('🚀 애플리케이션이 포트 3000에서 실행 중입니다.');
