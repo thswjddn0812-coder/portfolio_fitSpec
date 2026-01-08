@@ -353,6 +353,13 @@ export class MembersService {
       nextLevel: string;
       nextLevelTarget: number;
       remaining: number;
+      adjustedLevels: {
+        elite: number | null;
+        advanced: number | null;
+        intermediate: number | null;
+        novice: number | null;
+        beginner: number | null;
+      };
     }>;
   }> {
     // 1. 회원 정보 조회
@@ -374,7 +381,11 @@ export class MembersService {
     await queryRunner.startTransaction();
 
     try {
-      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD 형식
+      // 현재 날짜와 시간을 한국 시간대(KST, UTC+9)로 변환하여 YYYY-MM-DD HH:mm:ss 형식으로 저장
+      const now = new Date();
+      // UTC 시간에 9시간(32400000ms) 추가하여 한국 시간으로 변환
+      const koreaTime = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+      const measuredDateTime = koreaTime.toISOString().slice(0, 19).replace('T', ' '); // YYYY-MM-DD HH:mm:ss 형식
       const results: Array<{
         categoryId: number;
         exerciseName: string;
@@ -385,6 +396,13 @@ export class MembersService {
         nextLevel: string;
         nextLevelTarget: number;
         remaining: number;
+        adjustedLevels: {
+          elite: number | null;
+          advanced: number | null;
+          intermediate: number | null;
+          novice: number | null;
+          beginner: number | null;
+        };
       }> = [];
 
       // 3. 각 측정값 처리
@@ -494,11 +512,12 @@ export class MembersService {
         // 5. DB에 저장 (등급 계산 후 모든 정보 포함)
         const physicalRecord = queryRunner.manager.create(PhysicalRecords, {
           value: measurement.value.toString(),
-          measuredAt: today,
+          measuredAt: measuredDateTime,
           weightAtMeasured: member.weight,
           heightAtMeasured: member.height,
           ageAtMeasured: member.age,
           gradeScore: score,
+          trainerFeedback: measurement.trainerFeedback || null,
           member: member,
           category: category,
         });
@@ -515,6 +534,13 @@ export class MembersService {
           nextLevel: nextLevel,
           nextLevelTarget: nextLevelTarget || 0,
           remaining: Math.round(remaining * 100) / 100,
+          adjustedLevels: {
+            elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
+            advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
+            intermediate: adjustedLevels.intermediate ? Math.round(adjustedLevels.intermediate * 100) / 100 : null,
+            novice: adjustedLevels.novice ? Math.round(adjustedLevels.novice * 100) / 100 : null,
+            beginner: adjustedLevels.beginner ? Math.round(adjustedLevels.beginner * 100) / 100 : null,
+          },
         });
       }
 

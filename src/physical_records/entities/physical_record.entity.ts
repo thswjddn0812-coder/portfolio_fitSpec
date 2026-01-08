@@ -16,7 +16,7 @@ export class PhysicalRecords {
   @Column("decimal", { name: "value", precision: 10, scale: 2 })
   value: string;
 
-  @Column("date", { name: "measured_at" })
+  @Column("datetime", { name: "measured_at" })
   measuredAt: string;
 
   @Column("decimal", {
@@ -40,6 +40,9 @@ export class PhysicalRecords {
 
   @Column("int", { name: "grade_score", nullable: true })
   gradeScore: number | null;
+
+  @Column("text", { name: "trainer_feedback", nullable: true })
+  trainerFeedback: string | null;
 
   @ManyToOne(() => Members, (members) => members.physicalRecords, {
     onDelete: "CASCADE",
