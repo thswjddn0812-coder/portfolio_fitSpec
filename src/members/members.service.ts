@@ -398,18 +398,7 @@ export class MembersService {
           throw new NotFoundException(`카테고리 ID ${measurement.categoryId}를 찾을 수 없습니다.`);
         }
 
-        // DB에 저장
-        const physicalRecord = queryRunner.manager.create(PhysicalRecords, {
-          value: measurement.value.toString(),
-          measuredAt: today,
-          weightAtMeasured: member.weight,
-          member: member,
-          category: category,
-        });
-
-        await queryRunner.manager.save(PhysicalRecords, physicalRecord);
-
-        // 4. 등급 계산
+        // 4. 등급 계산 (DB 저장 전에 먼저 수행하여 gradeScore를 얻기 위해)
         // 4-1. EvaluationStandards에서 체중과 가장 가까운 내림값 찾기
         const evaluationStandard = await queryRunner.manager
           .createQueryBuilder(EvaluationStandards, 'es')
@@ -501,6 +490,20 @@ export class MembersService {
 
         const remaining = nextLevelTarget !== null ? Math.max(0, nextLevelTarget - measurement.value) : 0;
         const score = this.getScoreByLevel(currentLevel);
+
+        // 5. DB에 저장 (등급 계산 후 모든 정보 포함)
+        const physicalRecord = queryRunner.manager.create(PhysicalRecords, {
+          value: measurement.value.toString(),
+          measuredAt: today,
+          weightAtMeasured: member.weight,
+          heightAtMeasured: member.height,
+          ageAtMeasured: member.age,
+          gradeScore: score,
+          member: member,
+          category: category,
+        });
+
+        await queryRunner.manager.save(PhysicalRecords, physicalRecord);
 
         results.push({
           categoryId: measurement.categoryId,
