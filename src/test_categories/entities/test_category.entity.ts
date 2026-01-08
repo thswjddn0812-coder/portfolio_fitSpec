@@ -2,6 +2,7 @@ import { Column, Entity, OneToMany, PrimaryGeneratedColumn } from "typeorm";
 import { PhysicalRecords } from "../../physical_records/entities/physical_record.entity";
 import { PublicPhysicalRecords } from "../../public_physical_records/entities/public_physical_record.entity";
 import { EvaluationStandards } from "../../evaluation-standards/entities/evaluation-standard.entity";
+import { AgeCoefficients } from "../../age-coefficients/entities/age-coefficient.entity";
 
 @Entity("test_categories", { schema: "test" })
 export class TestCategories {
@@ -31,4 +32,10 @@ export class TestCategories {
     (evaluationStandards) => evaluationStandards.category
   )
   evaluationStandards: EvaluationStandards[];
+
+  @OneToMany(
+    () => AgeCoefficients,
+    (ageCoefficients) => ageCoefficients.category
+  )
+  ageCoefficients: AgeCoefficients[];
 }

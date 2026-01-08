@@ -174,20 +174,9 @@ export class MembersService {
       );
     }
 
-    // Step 2: AgeCoefficients에서 해당 gender와 age에 맞는 coefficient 가져오기
-    // 나이가 딱 맞지 않으면 가장 가까운 아래 나이 값 사용
-    const ageCoefficient = await this.ageCoefficientsRepository
-      .createQueryBuilder('ac')
-      .where('ac.gender = :gender', { gender })
-      .andWhere('ac.age <= :age', { age })
-      .orderBy('ac.age', 'DESC')
-      .getOne();
-
-    if (!ageCoefficient) {
-      throw new NotFoundException(
-        `해당 조건(gender: ${gender}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
-      );
-    }
+    // Step 2: AgeCoefficients에서 해당 gender, age, categoryId에 맞는 coefficient 가져오기
+    // 나이가 딱 맞지 않으면 가장 가까운 나이 값 사용
+    const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, categoryId);
 
     const coefficient = parseFloat(ageCoefficient.coefficient);
 
@@ -249,32 +238,48 @@ export class MembersService {
   }
 
   /**
-   * 나이 계수를 찾는 헬퍼 메서드 (가장 가까운 나이)
+   * 나이 계수를 찾는 헬퍼 메서드 (가장 가까운 나이, 카테고리별)
+   * 정확한 categoryId가 일치하는 데이터만 사용
    */
   private async findNearestAgeCoefficient(
     gender: 'M' | 'F',
     age: number,
+    categoryId: number,
   ): Promise<AgeCoefficients> {
-    // 아래 나이 중 가장 큰 값
+    // 디버깅: 해당 categoryId로 찾을 수 있는 데이터 확인
+    const allWithCategory = await this.ageCoefficientsRepository.find({
+      where: { gender, categoryId },
+    });
+    console.log(`[DEBUG] categoryId=${categoryId}인 데이터:`, allWithCategory.length, '개');
+    if (allWithCategory.length > 0) {
+      console.log('[DEBUG] 찾은 데이터:', allWithCategory.map(a => ({ age: a.age, coefficient: a.coefficient, categoryId: a.categoryId })));
+    }
+
+    // 아래 나이 중 가장 큰 값 (정확한 categoryId로만 찾기)
     const lowerAge = await this.ageCoefficientsRepository
       .createQueryBuilder('ac')
       .where('ac.gender = :gender', { gender })
+      .andWhere('ac.categoryId = :categoryId', { categoryId })
       .andWhere('ac.age <= :age', { age })
       .orderBy('ac.age', 'DESC')
       .getOne();
 
-    // 위 나이 중 가장 작은 값
+    // 위 나이 중 가장 작은 값 (정확한 categoryId로만 찾기)
     const upperAge = await this.ageCoefficientsRepository
       .createQueryBuilder('ac')
       .where('ac.gender = :gender', { gender })
+      .andWhere('ac.categoryId = :categoryId', { categoryId })
       .andWhere('ac.age > :age', { age })
       .orderBy('ac.age', 'ASC')
       .getOne();
 
+    console.log(`[DEBUG] lowerAge:`, lowerAge ? { age: lowerAge.age, coefficient: lowerAge.coefficient } : 'null');
+    console.log(`[DEBUG] upperAge:`, upperAge ? { age: upperAge.age, coefficient: upperAge.coefficient } : 'null');
+
     // 가장 가까운 나이 선택
     if (!lowerAge && !upperAge) {
       throw new NotFoundException(
-        `해당 조건(gender: ${gender}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
+        `해당 조건(gender: ${gender}, age: ${age}, categoryId: ${categoryId})에 맞는 나이 계수를 찾을 수 없습니다. DB에 카테고리 ${categoryId}에 대한 나이 계수 데이터를 추가해주세요.`,
       );
     }
 
@@ -421,10 +426,25 @@ export class MembersService {
           );
         }
 
-        // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기
-        const ageCoefficient = await this.findNearestAgeCoefficient(gender, age);
+        // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기 (카테고리별)
+        const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, measurement.categoryId);
 
         const coefficient = parseFloat(ageCoefficient.coefficient);
+
+        // 디버깅: 원본 기준값 출력
+        console.log(`[DEBUG] EvaluationStandard 원본 값:`, {
+          bodyWeight: evaluationStandard.bodyWeight,
+          elite: evaluationStandard.elite,
+          advanced: evaluationStandard.advanced,
+          intermediate: evaluationStandard.intermediate,
+          novice: evaluationStandard.novice,
+          beginner: evaluationStandard.beginner,
+        });
+        console.log(`[DEBUG] AgeCoefficient:`, {
+          age: ageCoefficient.age,
+          coefficient: ageCoefficient.coefficient,
+          categoryId: ageCoefficient.categoryId,
+        });
 
         // 4-3. 기준치에 나이 계수 곱하기
         const adjustedLevels = {
@@ -440,6 +460,10 @@ export class MembersService {
             ? parseFloat(evaluationStandard.beginner) * coefficient
             : null,
         };
+
+        // 디버깅: 계산된 기준값 출력
+        console.log(`[DEBUG] 계산된 기준값 (coefficient=${coefficient}):`, adjustedLevels);
+        console.log(`[DEBUG] 측정값:`, measurement.value);
 
         // 4-4. 등급 판정
         const levelOrder = [
@@ -458,6 +482,7 @@ export class MembersService {
           if (levelValue !== null && levelValue !== undefined && measurement.value >= levelValue) {
             currentLevel = levelOrder[i].name;
             currentIndex = i;
+            console.log(`[DEBUG] 등급 판정: ${measurement.value} >= ${levelValue} (${levelOrder[i].name})`);
             break;
           }
         }
