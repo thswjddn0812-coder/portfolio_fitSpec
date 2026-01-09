@@ -338,21 +338,12 @@ export class MembersService {
     gymId: number,
     dto: CalculateMeasurementsDto,
   ): Promise<{
-    totalSummary: {
-      overallLevel: string;
-      averageScore: number;
-      description: string;
-    };
     results: Array<{
       categoryId: number;
       exerciseName: string;
       value: number;
       unit: string;
-      level: string;
       score: number;
-      nextLevel: string;
-      nextLevelTarget: number;
-      remaining: number;
       adjustedLevels: {
         elite: number | null;
         advanced: number | null;
@@ -391,11 +382,7 @@ export class MembersService {
         exerciseName: string;
         value: number;
         unit: string;
-        level: string;
         score: number;
-        nextLevel: string;
-        nextLevelTarget: number;
-        remaining: number;
         adjustedLevels: {
           elite: number | null;
           advanced: number | null;
@@ -482,31 +469,16 @@ export class MembersService {
         ];
 
         let currentLevel = 'Beginner';
-        let currentIndex = levelOrder.length - 1;
 
         for (let i = 0; i < levelOrder.length; i++) {
           const levelValue = levelOrder[i].value;
           if (levelValue !== null && levelValue !== undefined && measurement.value >= levelValue) {
             currentLevel = levelOrder[i].name;
-            currentIndex = i;
             console.log(`[DEBUG] 등급 판정: ${measurement.value} >= ${levelValue} (${levelOrder[i].name})`);
             break;
           }
         }
 
-        // 다음 등급 찾기
-        let nextLevel = 'Elite';
-        let nextLevelTarget: number | null = null;
-        for (let i = currentIndex - 1; i >= 0; i--) {
-          const levelValue = levelOrder[i].value;
-          if (levelValue !== null) {
-            nextLevel = levelOrder[i].name;
-            nextLevelTarget = levelValue;
-            break;
-          }
-        }
-
-        const remaining = nextLevelTarget !== null ? Math.max(0, nextLevelTarget - measurement.value) : 0;
         const score = this.getScoreByLevel(currentLevel);
 
         // 5. DB에 저장 (등급 계산 후 모든 정보 포함)
@@ -529,11 +501,7 @@ export class MembersService {
           exerciseName: category.name,
           value: measurement.value,
           unit: category.unit,
-          level: currentLevel,
           score: score,
-          nextLevel: nextLevel,
-          nextLevelTarget: nextLevelTarget || 0,
-          remaining: Math.round(remaining * 100) / 100,
           adjustedLevels: {
             elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
             advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
@@ -547,17 +515,7 @@ export class MembersService {
       // 트랜잭션 커밋
       await queryRunner.commitTransaction();
 
-      // 5. 전체 요약 계산
-      const averageScore = results.reduce((sum, r) => sum + r.score, 0) / results.length;
-      const overallLevel = this.getOverallLevelByAverageScore(averageScore);
-      const description = this.getDescriptionByLevel(overallLevel);
-
       return {
-        totalSummary: {
-          overallLevel,
-          averageScore: Math.round(averageScore * 100) / 100,
-          description,
-        },
         results,
       };
     } catch (error) {
@@ -567,6 +525,425 @@ export class MembersService {
     } finally {
       // 쿼리 러너 해제
       await queryRunner.release();
+    }
+  }
+
+  /**
+   * 저장된 측정 결과 조회 (같은 measuredAt로 저장된 레코드들을 묶어서 반환)
+   * 날짜 필터링이 있으면 해당 날짜의 모든 측정 세션을 그룹화하여 반환
+   * 날짜 필터링이 없으면 모든 측정 기록을 날짜별로 그룹화하여 반환
+   */
+  async getMeasurements(
+    gymId: number,
+    memberId: number,
+    date?: string, // YYYY-MM-DD 형식, 선택사항
+  ): Promise<{
+    sessions?: Array<{
+      measuredAt: string;
+      results: Array<{
+        categoryId: number;
+        exerciseName: string;
+        value: number;
+        unit: string;
+        score: number;
+        adjustedLevels: {
+          elite: number | null;
+          advanced: number | null;
+          intermediate: number | null;
+          novice: number | null;
+          beginner: number | null;
+        };
+        trainerFeedback?: string | null;
+      }>;
+    }>;
+    sessionsByDate?: Array<{
+      date: string;
+      sessions: Array<{
+        measuredAt: string;
+        results: Array<{
+          categoryId: number;
+          exerciseName: string;
+          value: number;
+          unit: string;
+          score: number;
+          adjustedLevels: {
+            elite: number | null;
+            advanced: number | null;
+            intermediate: number | null;
+            novice: number | null;
+            beginner: number | null;
+          };
+          trainerFeedback?: string | null;
+        }>;
+      }>;
+    }>;
+    results?: Array<{
+      categoryId: number;
+      exerciseName: string;
+      value: number;
+      unit: string;
+      score: number;
+      adjustedLevels: {
+        elite: number | null;
+        advanced: number | null;
+        intermediate: number | null;
+        novice: number | null;
+        beginner: number | null;
+      };
+      trainerFeedback?: string | null;
+    }>;
+    measuredAt?: string;
+  }> {
+    // 1. 회원 정보 조회 및 권한 확인
+    const member = await this.membersRepository.findOne({
+      where: { id: memberId, gym: { id: gymId } },
+    });
+
+    if (!member) {
+      throw new NotFoundException(`헬스장 ID ${gymId}에 속한 회원 ID ${memberId}를 찾을 수 없습니다.`);
+    }
+
+    // 2. 측정 기록 조회
+    let query = this.physicalRecordsRepository
+      .createQueryBuilder('pr')
+      .leftJoinAndSelect('pr.category', 'category')
+      .where('pr.member_id = :memberId', { memberId })
+      .orderBy('pr.measured_at', 'DESC');
+
+    // 날짜 필터링 (있으면)
+    if (date) {
+      // YYYY-MM-DD 형식의 날짜를 시작일시와 종료일시로 변환
+      const startDate = `${date} 00:00:00`;
+      const endDate = `${date} 23:59:59`;
+      query.andWhere('pr.measured_at >= :startDate', { startDate });
+      query.andWhere('pr.measured_at <= :endDate', { endDate });
+    }
+
+    const records = await query.getMany();
+
+    if (records.length === 0) {
+      return {
+        sessions: [],
+      };
+    }
+
+    const gender = member.gender;
+
+    // 3. 날짜 필터링이 있으면 세션별로 그룹화, 없으면 최신 세션만 반환
+    if (date) {
+      // 날짜 필터링이 있을 때: 같은 날짜의 모든 측정 세션을 그룹화
+      const sessionsMap = new Map<string, PhysicalRecords[]>();
+
+      // measuredAt별로 그룹화
+      for (const record of records) {
+        const measuredAt = record.measuredAt;
+        if (!sessionsMap.has(measuredAt)) {
+          sessionsMap.set(measuredAt, []);
+        }
+        sessionsMap.get(measuredAt)!.push(record);
+      }
+
+      // 각 세션별로 결과 계산
+      const sessions: Array<{
+        measuredAt: string;
+        results: Array<{
+          categoryId: number;
+          exerciseName: string;
+          value: number;
+          unit: string;
+          score: number;
+          adjustedLevels: {
+            elite: number | null;
+            advanced: number | null;
+            intermediate: number | null;
+            novice: number | null;
+            beginner: number | null;
+          };
+          trainerFeedback?: string | null;
+        }>;
+      }> = [];
+
+      // measuredAt 기준 내림차순으로 정렬 (최신순)
+      const sortedMeasuredAts = Array.from(sessionsMap.keys()).sort((a, b) => {
+        return new Date(b).getTime() - new Date(a).getTime();
+      });
+
+      for (const measuredAt of sortedMeasuredAts) {
+        const sessionRecords = sessionsMap.get(measuredAt)!;
+        const sessionResults: Array<{
+          categoryId: number;
+          exerciseName: string;
+          value: number;
+          unit: string;
+          score: number;
+          adjustedLevels: {
+            elite: number | null;
+            advanced: number | null;
+            intermediate: number | null;
+            novice: number | null;
+            beginner: number | null;
+          };
+          trainerFeedback?: string | null;
+        }> = [];
+
+        for (const record of sessionRecords) {
+          const bodyWeight = parseFloat(record.weightAtMeasured || member.weight);
+          const age = record.ageAtMeasured || member.age;
+          const measuredValue = parseFloat(record.value);
+
+          // EvaluationStandards 조회
+          const evaluationStandard = await this.evaluationStandardsRepository
+            .createQueryBuilder('es')
+            .leftJoinAndSelect('es.category', 'category')
+            .where('es.gender = :gender', { gender })
+            .andWhere('category.id = :categoryId', { categoryId: record.category.id })
+            .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
+            .orderBy('es.bodyWeight', 'DESC')
+            .getOne();
+
+          if (!evaluationStandard) {
+            throw new NotFoundException(
+              `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
+            );
+          }
+
+          // AgeCoefficients 조회
+          const ageCoefficient = await this.findNearestAgeCoefficient(
+            gender,
+            age,
+            record.category.id,
+          );
+
+          const coefficient = parseFloat(ageCoefficient.coefficient);
+
+          // adjustedLevels 계산
+          const adjustedLevels = {
+            elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+            advanced: evaluationStandard.advanced
+              ? parseFloat(evaluationStandard.advanced) * coefficient
+              : null,
+            intermediate: evaluationStandard.intermediate
+              ? parseFloat(evaluationStandard.intermediate) * coefficient
+              : null,
+            novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+            beginner: evaluationStandard.beginner
+              ? parseFloat(evaluationStandard.beginner) * coefficient
+              : null,
+          };
+
+          sessionResults.push({
+            categoryId: record.category.id,
+            exerciseName: record.category.name,
+            value: measuredValue,
+            unit: record.category.unit,
+            score: record.gradeScore || 1,
+            adjustedLevels: {
+              elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
+              advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
+              intermediate: adjustedLevels.intermediate ? Math.round(adjustedLevels.intermediate * 100) / 100 : null,
+              novice: adjustedLevels.novice ? Math.round(adjustedLevels.novice * 100) / 100 : null,
+              beginner: adjustedLevels.beginner ? Math.round(adjustedLevels.beginner * 100) / 100 : null,
+            },
+            trainerFeedback: record.trainerFeedback,
+          });
+        }
+
+        sessions.push({
+          measuredAt,
+          results: sessionResults,
+        });
+      }
+
+      return {
+        sessions,
+      };
+    } else {
+      // 날짜 필터링이 없을 때: 모든 측정 기록을 날짜별로 그룹화하여 반환
+      // 1단계: measuredAt별로 그룹화 (세션 그룹)
+      const sessionsMap = new Map<string, PhysicalRecords[]>();
+      
+      for (const record of records) {
+        // measuredAt를 문자열로 변환 (타입은 string이지만 런타임에 Date일 수 있음)
+        let measuredAtStr: string;
+        const measuredAtValue = record.measuredAt as any;
+        if (measuredAtValue instanceof Date) {
+          measuredAtStr = measuredAtValue.toISOString();
+        } else if (typeof measuredAtValue === 'string') {
+          measuredAtStr = measuredAtValue;
+        } else {
+          measuredAtStr = new Date(measuredAtValue).toISOString();
+        }
+        
+        if (!sessionsMap.has(measuredAtStr)) {
+          sessionsMap.set(measuredAtStr, []);
+        }
+        sessionsMap.get(measuredAtStr)!.push(record);
+      }
+
+      // 2단계: 날짜별로 그룹화
+      const datesMap = new Map<string, Map<string, PhysicalRecords[]>>();
+      
+      for (const [measuredAt, sessionRecords] of sessionsMap.entries()) {
+        // measuredAt는 이미 문자열이므로 날짜 부분만 추출 (YYYY-MM-DD)
+        // "2026-01-09T10:00:00" 또는 "2026-01-09 10:00:00" 형식 처리
+        const dateKey = measuredAt.split('T')[0].split(' ')[0];
+        
+        if (!datesMap.has(dateKey)) {
+          datesMap.set(dateKey, new Map());
+        }
+        // measuredAt는 이미 문자열이므로 그대로 사용
+        datesMap.get(dateKey)!.set(measuredAt, sessionRecords);
+      }
+
+      // 3단계: 날짜별로 결과 구성
+      const sessionsByDate: Array<{
+        date: string;
+        sessions: Array<{
+          measuredAt: string;
+          results: Array<{
+            categoryId: number;
+            exerciseName: string;
+            value: number;
+            unit: string;
+            score: number;
+            adjustedLevels: {
+              elite: number | null;
+              advanced: number | null;
+              intermediate: number | null;
+              novice: number | null;
+              beginner: number | null;
+            };
+            trainerFeedback?: string | null;
+          }>;
+        }>;
+      }> = [];
+
+      // 날짜 기준 내림차순 정렬 (최신 날짜가 먼저)
+      const sortedDates = Array.from(datesMap.keys()).sort((a, b) => {
+        return new Date(b).getTime() - new Date(a).getTime();
+      });
+
+      for (const dateKey of sortedDates) {
+        const sessionsForDate = datesMap.get(dateKey)!;
+        const sessions: Array<{
+          measuredAt: string;
+          results: Array<{
+            categoryId: number;
+            exerciseName: string;
+            value: number;
+            unit: string;
+            score: number;
+            adjustedLevels: {
+              elite: number | null;
+              advanced: number | null;
+              intermediate: number | null;
+              novice: number | null;
+              beginner: number | null;
+            };
+            trainerFeedback?: string | null;
+          }>;
+        }> = [];
+
+        // 같은 날짜 내에서 measuredAt 기준 내림차순 정렬 (최신 세션이 먼저)
+        const sortedMeasuredAts = Array.from(sessionsForDate.keys()).sort((a, b) => {
+          return new Date(b).getTime() - new Date(a).getTime();
+        });
+
+        for (const measuredAt of sortedMeasuredAts) {
+          const sessionRecords = sessionsForDate.get(measuredAt)!;
+          const sessionResults: Array<{
+            categoryId: number;
+            exerciseName: string;
+            value: number;
+            unit: string;
+            score: number;
+            adjustedLevels: {
+              elite: number | null;
+              advanced: number | null;
+              intermediate: number | null;
+              novice: number | null;
+              beginner: number | null;
+            };
+            trainerFeedback?: string | null;
+          }> = [];
+
+          for (const record of sessionRecords) {
+            const bodyWeight = parseFloat(record.weightAtMeasured || member.weight);
+            const age = record.ageAtMeasured || member.age;
+            const measuredValue = parseFloat(record.value);
+
+            // EvaluationStandards 조회
+            const evaluationStandard = await this.evaluationStandardsRepository
+              .createQueryBuilder('es')
+              .leftJoinAndSelect('es.category', 'category')
+              .where('es.gender = :gender', { gender })
+              .andWhere('category.id = :categoryId', { categoryId: record.category.id })
+              .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
+              .orderBy('es.bodyWeight', 'DESC')
+              .getOne();
+
+            if (!evaluationStandard) {
+              throw new NotFoundException(
+                `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
+              );
+            }
+
+            // AgeCoefficients 조회
+            const ageCoefficient = await this.findNearestAgeCoefficient(
+              gender,
+              age,
+              record.category.id,
+            );
+
+            const coefficient = parseFloat(ageCoefficient.coefficient);
+
+            // adjustedLevels 계산
+            const adjustedLevels = {
+              elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+              advanced: evaluationStandard.advanced
+                ? parseFloat(evaluationStandard.advanced) * coefficient
+                : null,
+              intermediate: evaluationStandard.intermediate
+                ? parseFloat(evaluationStandard.intermediate) * coefficient
+                : null,
+              novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+              beginner: evaluationStandard.beginner
+                ? parseFloat(evaluationStandard.beginner) * coefficient
+                : null,
+            };
+
+            sessionResults.push({
+              categoryId: record.category.id,
+              exerciseName: record.category.name,
+              value: measuredValue,
+              unit: record.category.unit,
+              score: record.gradeScore || 1,
+              adjustedLevels: {
+                elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
+                advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
+                intermediate: adjustedLevels.intermediate ? Math.round(adjustedLevels.intermediate * 100) / 100 : null,
+                novice: adjustedLevels.novice ? Math.round(adjustedLevels.novice * 100) / 100 : null,
+                beginner: adjustedLevels.beginner ? Math.round(adjustedLevels.beginner * 100) / 100 : null,
+              },
+              trainerFeedback: record.trainerFeedback,
+            });
+          }
+
+          sessions.push({
+            measuredAt,
+            results: sessionResults,
+          });
+        }
+
+        sessionsByDate.push({
+          date: dateKey,
+          sessions,
+        });
+      }
+
+      return {
+        sessionsByDate,
+      };
     }
   }
 }

@@ -46,8 +46,8 @@ import { AgeCoefficientsModule } from './age-coefficients/age-coefficients.modul
       ],
       synchronize:false, // Code First 방식으로 스키마 자동 생성
       logging: true, // SQL 쿼리 로그 출력
-      ssl: process.env.DB_SSL === 'true' ? {
-        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+      ssl: process.env.DB_SSL === 'true' || process.env.DB_HOST?.includes('tidbcloud') ? {
+        rejectUnauthorized: false, // TiDB Cloud의 경우 인증서 검증 비활성화
       } : false,
     }),
     GymsModule,
