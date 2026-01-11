@@ -1,4 +1,4 @@
-import { IsNumber, IsArray, ValidateNested, Min } from 'class-validator';
+import { IsNumber, IsArray, ValidateNested, Min, IsOptional, IsString } from 'class-validator';
 import { Type } from 'class-transformer';
 
 class MeasurementDto {
@@ -9,6 +9,10 @@ class MeasurementDto {
   @IsNumber()
   @Min(0)
   value: number;
+
+  @IsString()
+  @IsOptional()
+  trainerFeedback?: string;
 }
 
 export class CalculateMeasurementsDto {

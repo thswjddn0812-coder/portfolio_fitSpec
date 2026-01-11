@@ -105,6 +105,30 @@ export class MembersController {
   }
 
   /**
+   * 저장된 측정 결과 조회 - 최신 결과
+   */
+  @Get(':id/measurements/latest')
+  @HttpCode(HttpStatus.OK)
+  getLatestMeasurements(@Req() req: Request, @Param('id') id: string) {
+    const gymId = this.getGymId(req);
+    return this.membersService.getMeasurements(gymId, +id);
+  }
+
+  /**
+   * 저장된 측정 결과 조회 - 특정 날짜 또는 전체 이력
+   */
+  @Get(':id/measurements')
+  @HttpCode(HttpStatus.OK)
+  getMeasurements(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Query('date') date?: string,
+  ) {
+    const gymId = this.getGymId(req);
+    return this.membersService.getMeasurements(gymId, +id, date);
+  }
+
+  /**
    * 쿠키 또는 토큰에서 gym_id 추출
    */
   private getGymId(req: Request): number {
