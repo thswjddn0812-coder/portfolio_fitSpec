@@ -403,7 +403,7 @@ export class MembersService {
           throw new NotFoundException(`카테고리 ID ${measurement.categoryId}를 찾을 수 없습니다.`);
         }
 
-        // 4. 등급 계산 (DB 저장 전에 먼저 수행하여 gradeScore를 얻기 위해)
+        // 4. 등급 계산 (평가 기준이 있는 경우에만 수행)
         // 4-1. EvaluationStandards에서 체중과 가장 가까운 내림값 찾기
         const evaluationStandard = await queryRunner.manager
           .createQueryBuilder(EvaluationStandards, 'es')
@@ -414,74 +414,99 @@ export class MembersService {
           .orderBy('es.bodyWeight', 'DESC')
           .getOne();
 
-        if (!evaluationStandard) {
-          throw new NotFoundException(
-            `해당 조건(gender: ${gender}, categoryId: ${measurement.categoryId}, bodyWeight: ${bodyWeight})에 맞는 평가 기준을 찾을 수 없습니다.`,
-          );
-        }
-
-        // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기 (카테고리별)
-        const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, measurement.categoryId);
-
-        const coefficient = parseFloat(ageCoefficient.coefficient);
-
-        // 디버깅: 원본 기준값 출력
-        console.log(`[DEBUG] EvaluationStandard 원본 값:`, {
-          bodyWeight: evaluationStandard.bodyWeight,
-          elite: evaluationStandard.elite,
-          advanced: evaluationStandard.advanced,
-          intermediate: evaluationStandard.intermediate,
-          novice: evaluationStandard.novice,
-          beginner: evaluationStandard.beginner,
-        });
-        console.log(`[DEBUG] AgeCoefficient:`, {
-          age: ageCoefficient.age,
-          coefficient: ageCoefficient.coefficient,
-          categoryId: ageCoefficient.categoryId,
-        });
-
-        // 4-3. 기준치에 나이 계수 곱하기
-        const adjustedLevels = {
-          elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
-          advanced: evaluationStandard.advanced
-            ? parseFloat(evaluationStandard.advanced) * coefficient
-            : null,
-          intermediate: evaluationStandard.intermediate
-            ? parseFloat(evaluationStandard.intermediate) * coefficient
-            : null,
-          novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
-          beginner: evaluationStandard.beginner
-            ? parseFloat(evaluationStandard.beginner) * coefficient
-            : null,
+        let score: number | null = null;
+        let adjustedLevels: {
+          elite: number | null;
+          advanced: number | null;
+          intermediate: number | null;
+          novice: number | null;
+          beginner: number | null;
+        } = {
+          elite: null,
+          advanced: null,
+          intermediate: null,
+          novice: null,
+          beginner: null,
         };
 
-        // 디버깅: 계산된 기준값 출력
-        console.log(`[DEBUG] 계산된 기준값 (coefficient=${coefficient}):`, adjustedLevels);
-        console.log(`[DEBUG] 측정값:`, measurement.value);
+        // 평가 기준이 있는 경우에만 등급 계산 수행
+        if (evaluationStandard) {
+          try {
+            // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기 (카테고리별)
+            const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, measurement.categoryId);
 
-        // 4-4. 등급 판정
-        const levelOrder = [
-          { name: 'Elite', value: adjustedLevels.elite },
-          { name: 'Advanced', value: adjustedLevels.advanced },
-          { name: 'Intermediate', value: adjustedLevels.intermediate },
-          { name: 'Novice', value: adjustedLevels.novice },
-          { name: 'Beginner', value: adjustedLevels.beginner },
-        ];
+            const coefficient = parseFloat(ageCoefficient.coefficient);
 
-        let currentLevel = 'Beginner';
+            // 디버깅: 원본 기준값 출력
+            console.log(`[DEBUG] EvaluationStandard 원본 값:`, {
+              bodyWeight: evaluationStandard.bodyWeight,
+              elite: evaluationStandard.elite,
+              advanced: evaluationStandard.advanced,
+              intermediate: evaluationStandard.intermediate,
+              novice: evaluationStandard.novice,
+              beginner: evaluationStandard.beginner,
+            });
+            console.log(`[DEBUG] AgeCoefficient:`, {
+              age: ageCoefficient.age,
+              coefficient: ageCoefficient.coefficient,
+              categoryId: ageCoefficient.categoryId,
+            });
 
-        for (let i = 0; i < levelOrder.length; i++) {
-          const levelValue = levelOrder[i].value;
-          if (levelValue !== null && levelValue !== undefined && measurement.value >= levelValue) {
-            currentLevel = levelOrder[i].name;
-            console.log(`[DEBUG] 등급 판정: ${measurement.value} >= ${levelValue} (${levelOrder[i].name})`);
-            break;
+            // 4-3. 기준치에 나이 계수 곱하기
+            adjustedLevels = {
+              elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+              advanced: evaluationStandard.advanced
+                ? parseFloat(evaluationStandard.advanced) * coefficient
+                : null,
+              intermediate: evaluationStandard.intermediate
+                ? parseFloat(evaluationStandard.intermediate) * coefficient
+                : null,
+              novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+              beginner: evaluationStandard.beginner
+                ? parseFloat(evaluationStandard.beginner) * coefficient
+                : null,
+            };
+
+            // 디버깅: 계산된 기준값 출력
+            console.log(`[DEBUG] 계산된 기준값 (coefficient=${coefficient}):`, adjustedLevels);
+            console.log(`[DEBUG] 측정값:`, measurement.value);
+
+            // 4-4. 등급 판정
+            const levelOrder = [
+              { name: 'Elite', value: adjustedLevels.elite },
+              { name: 'Advanced', value: adjustedLevels.advanced },
+              { name: 'Intermediate', value: adjustedLevels.intermediate },
+              { name: 'Novice', value: adjustedLevels.novice },
+              { name: 'Beginner', value: adjustedLevels.beginner },
+            ];
+
+            let currentLevel = 'Beginner';
+
+            for (let i = 0; i < levelOrder.length; i++) {
+              const levelValue = levelOrder[i].value;
+              if (levelValue !== null && levelValue !== undefined && measurement.value >= levelValue) {
+                currentLevel = levelOrder[i].name;
+                console.log(`[DEBUG] 등급 판정: ${measurement.value} >= ${levelValue} (${levelOrder[i].name})`);
+                break;
+              }
+            }
+
+            score = this.getScoreByLevel(currentLevel);
+          } catch (error) {
+            // AgeCoefficients 조회 실패 시에도 평가 기준 없는 것으로 처리
+            console.log(`[DEBUG] 평가 기준 계산 실패, 값 그대로 저장:`, error);
+            score = null;
+            adjustedLevels = {
+              elite: null,
+              advanced: null,
+              intermediate: null,
+              novice: null,
+              beginner: null,
+            };
           }
         }
 
-        const score = this.getScoreByLevel(currentLevel);
-
-        // 5. DB에 저장 (등급 계산 후 모든 정보 포함)
+        // 5. DB에 저장 (평가 기준이 없으면 gradeScore는 null)
         const physicalRecord = queryRunner.manager.create(PhysicalRecords, {
           value: measurement.value.toString(),
           measuredAt: measuredDateTime,
@@ -501,7 +526,7 @@ export class MembersService {
           exerciseName: category.name,
           value: measurement.value,
           unit: category.unit,
-          score: score,
+          score: score || 0,
           adjustedLevels: {
             elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
             advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
@@ -701,42 +726,64 @@ export class MembersService {
             .orderBy('es.bodyWeight', 'DESC')
             .getOne();
 
-          if (!evaluationStandard) {
-            throw new NotFoundException(
-              `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
-            );
-          }
-
-          // AgeCoefficients 조회
-          const ageCoefficient = await this.findNearestAgeCoefficient(
-            gender,
-            age,
-            record.category.id,
-          );
-
-          const coefficient = parseFloat(ageCoefficient.coefficient);
-
-          // adjustedLevels 계산
-          const adjustedLevels = {
-            elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
-            advanced: evaluationStandard.advanced
-              ? parseFloat(evaluationStandard.advanced) * coefficient
-              : null,
-            intermediate: evaluationStandard.intermediate
-              ? parseFloat(evaluationStandard.intermediate) * coefficient
-              : null,
-            novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
-            beginner: evaluationStandard.beginner
-              ? parseFloat(evaluationStandard.beginner) * coefficient
-              : null,
+          let adjustedLevels: {
+            elite: number | null;
+            advanced: number | null;
+            intermediate: number | null;
+            novice: number | null;
+            beginner: number | null;
+          } = {
+            elite: null,
+            advanced: null,
+            intermediate: null,
+            novice: null,
+            beginner: null,
           };
+
+          // 평가 기준이 있는 경우에만 계산
+          if (evaluationStandard) {
+            try {
+              // AgeCoefficients 조회
+              const ageCoefficient = await this.findNearestAgeCoefficient(
+                gender,
+                age,
+                record.category.id,
+              );
+
+              const coefficient = parseFloat(ageCoefficient.coefficient);
+
+              // adjustedLevels 계산
+              adjustedLevels = {
+                elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+                advanced: evaluationStandard.advanced
+                  ? parseFloat(evaluationStandard.advanced) * coefficient
+                  : null,
+                intermediate: evaluationStandard.intermediate
+                  ? parseFloat(evaluationStandard.intermediate) * coefficient
+                  : null,
+                novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+                beginner: evaluationStandard.beginner
+                  ? parseFloat(evaluationStandard.beginner) * coefficient
+                  : null,
+              };
+            } catch (error) {
+              // AgeCoefficients 조회 실패 시에도 평가 기준 없는 것으로 처리
+              adjustedLevels = {
+                elite: null,
+                advanced: null,
+                intermediate: null,
+                novice: null,
+                beginner: null,
+              };
+            }
+          }
 
           sessionResults.push({
             categoryId: record.category.id,
             exerciseName: record.category.name,
             value: measuredValue,
             unit: record.category.unit,
-            score: record.gradeScore || 1,
+            score: record.gradeScore || 0,
             adjustedLevels: {
               elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
               advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
@@ -882,42 +929,64 @@ export class MembersService {
               .orderBy('es.bodyWeight', 'DESC')
               .getOne();
 
-            if (!evaluationStandard) {
-              throw new NotFoundException(
-                `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
-              );
-            }
-
-            // AgeCoefficients 조회
-            const ageCoefficient = await this.findNearestAgeCoefficient(
-              gender,
-              age,
-              record.category.id,
-            );
-
-            const coefficient = parseFloat(ageCoefficient.coefficient);
-
-            // adjustedLevels 계산
-            const adjustedLevels = {
-              elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
-              advanced: evaluationStandard.advanced
-                ? parseFloat(evaluationStandard.advanced) * coefficient
-                : null,
-              intermediate: evaluationStandard.intermediate
-                ? parseFloat(evaluationStandard.intermediate) * coefficient
-                : null,
-              novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
-              beginner: evaluationStandard.beginner
-                ? parseFloat(evaluationStandard.beginner) * coefficient
-                : null,
+            let adjustedLevels: {
+              elite: number | null;
+              advanced: number | null;
+              intermediate: number | null;
+              novice: number | null;
+              beginner: number | null;
+            } = {
+              elite: null,
+              advanced: null,
+              intermediate: null,
+              novice: null,
+              beginner: null,
             };
+
+            // 평가 기준이 있는 경우에만 계산
+            if (evaluationStandard) {
+              try {
+                // AgeCoefficients 조회
+                const ageCoefficient = await this.findNearestAgeCoefficient(
+                  gender,
+                  age,
+                  record.category.id,
+                );
+
+                const coefficient = parseFloat(ageCoefficient.coefficient);
+
+                // adjustedLevels 계산
+                adjustedLevels = {
+                  elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
+                  advanced: evaluationStandard.advanced
+                    ? parseFloat(evaluationStandard.advanced) * coefficient
+                    : null,
+                  intermediate: evaluationStandard.intermediate
+                    ? parseFloat(evaluationStandard.intermediate) * coefficient
+                    : null,
+                  novice: evaluationStandard.novice ? parseFloat(evaluationStandard.novice) * coefficient : null,
+                  beginner: evaluationStandard.beginner
+                    ? parseFloat(evaluationStandard.beginner) * coefficient
+                    : null,
+                };
+              } catch (error) {
+                // AgeCoefficients 조회 실패 시에도 평가 기준 없는 것으로 처리
+                adjustedLevels = {
+                  elite: null,
+                  advanced: null,
+                  intermediate: null,
+                  novice: null,
+                  beginner: null,
+                };
+              }
+            }
 
             sessionResults.push({
               categoryId: record.category.id,
               exerciseName: record.category.name,
               value: measuredValue,
               unit: record.category.unit,
-              score: record.gradeScore || 1,
+              score: record.gradeScore || 0,
               adjustedLevels: {
                 elite: adjustedLevels.elite ? Math.round(adjustedLevels.elite * 100) / 100 : null,
                 advanced: adjustedLevels.advanced ? Math.round(adjustedLevels.advanced * 100) / 100 : null,
