@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThanOrEqual, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { Members } from './entities/member.entity';
@@ -290,6 +290,58 @@ export class MembersService {
     const upperDiff = upperAge.age - age;
 
     return lowerDiff <= upperDiff ? lowerAge : upperAge;
+  }
+
+  /**
+   * IN 쿼리로 가져온 평가 기준 목록에서, categoryId·bodyWeight에 맞는 행(체중 내림 매칭)을 메모리에서 찾기
+   */
+  private findEvaluationStandardInMemory(
+    standardsByCategory: Map<number, EvaluationStandards[]>,
+    categoryId: number,
+    bodyWeight: number,
+  ): EvaluationStandards {
+    const list = standardsByCategory.get(categoryId);
+    if (!list || list.length === 0) {
+      throw new NotFoundException(
+        `카테고리 ID ${categoryId}에 대한 평가 기준을 찾을 수 없습니다.`,
+      );
+    }
+    // bodyWeight DESC 정렬된 상태 가정 → body_weight <= bodyWeight 인 첫 번째
+    const found = list.find((es) => (es.bodyWeight ?? 0) <= bodyWeight);
+    if (!found) {
+      throw new NotFoundException(
+        `해당 조건(categoryId: ${categoryId}, bodyWeight: ${bodyWeight})에 맞는 평가 기준을 찾을 수 없습니다.`,
+      );
+    }
+    return found;
+  }
+
+  /**
+   * IN 쿼리로 가져온 나이 계수 목록에서, categoryId·age에 가장 가까운 나이 계수를 메모리에서 찾기
+   */
+  private findNearestAgeCoefficientInMemory(
+    coefficientsByCategory: Map<number, AgeCoefficients[]>,
+    categoryId: number,
+    age: number,
+  ): AgeCoefficients {
+    const list = coefficientsByCategory.get(categoryId);
+    if (!list || list.length === 0) {
+      throw new NotFoundException(
+        `해당 조건(categoryId: ${categoryId}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
+      );
+    }
+    const lower = list.filter((a) => a.age <= age).sort((a, b) => b.age - a.age)[0];
+    const upper = list.filter((a) => a.age > age).sort((a, b) => a.age - b.age)[0];
+    if (!lower && !upper) {
+      throw new NotFoundException(
+        `해당 조건(categoryId: ${categoryId}, age: ${age})에 맞는 나이 계수를 찾을 수 없습니다.`,
+      );
+    }
+    if (!lower) return upper!;
+    if (!upper) return lower;
+    const lowerDiff = age - lower.age;
+    const upperDiff = upper.age - age;
+    return lowerDiff <= upperDiff ? lower : upper;
   }
 
   /**
@@ -629,7 +681,43 @@ export class MembersService {
 
     const gender = member.gender;
 
-    // 3. 날짜 필터링이 있으면 세션별로 그룹화, 없으면 최신 세션만 반환
+    // 3. 이 회원 기록에서 사용된 categoryId 목록으로 evaluation_standards, age_coefficients IN 쿼리 1회씩 조회
+    const categoryIds = [...new Set(records.map((r) => r.category.id))];
+
+    const [allEvaluationStandards, allAgeCoefficients] = await Promise.all([
+      this.evaluationStandardsRepository
+        .createQueryBuilder('es')
+        .leftJoinAndSelect('es.category', 'category')
+        .where('es.gender = :gender', { gender })
+        .andWhere('category.id IN (:...categoryIds)', { categoryIds })
+        .getMany(),
+      this.ageCoefficientsRepository.find({
+        where: { gender, categoryId: In(categoryIds) },
+      }),
+    ]);
+
+    const standardsByCategory = new Map<number, EvaluationStandards[]>();
+    for (const es of allEvaluationStandards) {
+      const cid = es.category?.id;
+      if (cid == null) continue;
+      if (!standardsByCategory.has(cid)) standardsByCategory.set(cid, []);
+      standardsByCategory.get(cid)!.push(es);
+    }
+    for (const [, arr] of standardsByCategory) {
+      arr.sort((a, b) => (b.bodyWeight ?? 0) - (a.bodyWeight ?? 0));
+    }
+
+    const coefficientsByCategory = new Map<number, AgeCoefficients[]>();
+    for (const ac of allAgeCoefficients) {
+      const cid = ac.categoryId ?? 0;
+      if (!coefficientsByCategory.has(cid)) coefficientsByCategory.set(cid, []);
+      coefficientsByCategory.get(cid)!.push(ac);
+    }
+    for (const [, arr] of coefficientsByCategory) {
+      arr.sort((a, b) => a.age - b.age);
+    }
+
+    // 4. 날짜 필터링이 있으면 세션별로 그룹화, 없으면 날짜별 그룹화
     if (date) {
       // 날짜 필터링이 있을 때: 같은 날짜의 모든 측정 세션을 그룹화
       const sessionsMap = new Map<string, PhysicalRecords[]>();
@@ -691,32 +779,18 @@ export class MembersService {
           const age = record.ageAtMeasured || member.age;
           const measuredValue = parseFloat(record.value);
 
-          // EvaluationStandards 조회
-          const evaluationStandard = await this.evaluationStandardsRepository
-            .createQueryBuilder('es')
-            .leftJoinAndSelect('es.category', 'category')
-            .where('es.gender = :gender', { gender })
-            .andWhere('category.id = :categoryId', { categoryId: record.category.id })
-            .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
-            .orderBy('es.bodyWeight', 'DESC')
-            .getOne();
-
-          if (!evaluationStandard) {
-            throw new NotFoundException(
-              `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
-            );
-          }
-
-          // AgeCoefficients 조회
-          const ageCoefficient = await this.findNearestAgeCoefficient(
-            gender,
-            age,
+          const evaluationStandard = this.findEvaluationStandardInMemory(
+            standardsByCategory,
             record.category.id,
+            bodyWeight,
           );
-
+          const ageCoefficient = this.findNearestAgeCoefficientInMemory(
+            coefficientsByCategory,
+            record.category.id,
+            age,
+          );
           const coefficient = parseFloat(ageCoefficient.coefficient);
 
-          // adjustedLevels 계산
           const adjustedLevels = {
             elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
             advanced: evaluationStandard.advanced
@@ -872,32 +946,18 @@ export class MembersService {
             const age = record.ageAtMeasured || member.age;
             const measuredValue = parseFloat(record.value);
 
-            // EvaluationStandards 조회
-            const evaluationStandard = await this.evaluationStandardsRepository
-              .createQueryBuilder('es')
-              .leftJoinAndSelect('es.category', 'category')
-              .where('es.gender = :gender', { gender })
-              .andWhere('category.id = :categoryId', { categoryId: record.category.id })
-              .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
-              .orderBy('es.bodyWeight', 'DESC')
-              .getOne();
-
-            if (!evaluationStandard) {
-              throw new NotFoundException(
-                `카테고리 ID ${record.category.id}에 대한 평가 기준을 찾을 수 없습니다.`,
-              );
-            }
-
-            // AgeCoefficients 조회
-            const ageCoefficient = await this.findNearestAgeCoefficient(
-              gender,
-              age,
+            const evaluationStandard = this.findEvaluationStandardInMemory(
+              standardsByCategory,
               record.category.id,
+              bodyWeight,
             );
-
+            const ageCoefficient = this.findNearestAgeCoefficientInMemory(
+              coefficientsByCategory,
+              record.category.id,
+              age,
+            );
             const coefficient = parseFloat(ageCoefficient.coefficient);
 
-            // adjustedLevels 계산
             const adjustedLevels = {
               elite: evaluationStandard.elite ? parseFloat(evaluationStandard.elite) * coefficient : null,
               advanced: evaluationStandard.advanced
