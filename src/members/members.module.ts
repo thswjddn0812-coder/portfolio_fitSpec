@@ -9,6 +9,7 @@ import { EvaluationStandards } from '../evaluation-standards/entities/evaluation
 import { AgeCoefficients } from '../age-coefficients/entities/age-coefficient.entity';
 import { TestCategories } from '../test_categories/entities/test_category.entity';
 import { PhysicalRecords } from '../physical_records/entities/physical_record.entity';
+import { StandardsCacheService } from '../common/cache/standards-cache.service';
 
 @Module({
   imports: [
@@ -16,7 +17,7 @@ import { PhysicalRecords } from '../physical_records/entities/physical_record.en
     AuthModule, // JwtModule을 사용하기 위해 import
   ],
   controllers: [MembersController],
-  providers: [MembersService],
+  providers: [MembersService, StandardsCacheService],
   exports: [MembersService],
 })
 export class MembersModule {}

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, In } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { CreateMemberDto } from './dto/create-member.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { Members } from './entities/member.entity';
@@ -10,6 +10,7 @@ import { AgeCoefficients } from '../age-coefficients/entities/age-coefficient.en
 import { TestCategories } from '../test_categories/entities/test_category.entity';
 import { PhysicalRecords } from '../physical_records/entities/physical_record.entity';
 import { CalculateMeasurementsDto } from './dto/calculate-measurements.dto';
+import { StandardsCacheService } from '../common/cache/standards-cache.service';
 
 @Injectable()
 export class MembersService {
@@ -27,6 +28,7 @@ export class MembersService {
     @InjectRepository(PhysicalRecords)
     private physicalRecordsRepository: Repository<PhysicalRecords>,
     private dataSource: DataSource,
+    private readonly standardsCache: StandardsCacheService,
   ) {}
 
   async create(gymId: number, createMemberDto: CreateMemberDto) {
@@ -157,26 +159,16 @@ export class MembersService {
     measuredWeight: number,
     categoryId: number,
   ): Promise<{ level: string; nextLevelTarget: number; remaining: number }> {
-    // Step 1: EvaluationStandards에서 해당 gender와 categoryId를 가진 행 중,
-    // bodyWeight가 입력값보다 작거나 같은 것 중 가장 큰 행을 가져오기
-    const evaluationStandard = await this.evaluationStandardsRepository
-      .createQueryBuilder('es')
-      .leftJoinAndSelect('es.category', 'category')
-      .where('es.gender = :gender', { gender })
-      .andWhere('category.id = :categoryId', { categoryId })
-      .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
-      .orderBy('es.bodyWeight', 'DESC')
-      .getOne();
-
-    if (!evaluationStandard) {
-      throw new NotFoundException(
-        `해당 조건(gender: ${gender}, categoryId: ${categoryId}, bodyWeight: ${bodyWeight})에 맞는 평가 기준을 찾을 수 없습니다.`,
-      );
-    }
-
-    // Step 2: AgeCoefficients에서 해당 gender, age, categoryId에 맞는 coefficient 가져오기
-    // 나이가 딱 맞지 않으면 가장 가까운 나이 값 사용
-    const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, categoryId);
+    const evaluationStandard = await this.standardsCache.getEvaluationStandardOrThrow(
+      gender,
+      categoryId,
+      bodyWeight,
+    );
+    const ageCoefficient = await this.standardsCache.getNearestAgeCoefficientOrThrow(
+      gender,
+      categoryId,
+      age,
+    );
 
     const coefficient = parseFloat(ageCoefficient.coefficient);
 
@@ -446,25 +438,13 @@ export class MembersService {
 
       // 3. 각 측정값 처리
       for (const measurement of dto.measurements) {
-        // 카테고리 정보 조회
-        const category = await this.testCategoriesRepository.findOne({
-          where: { id: measurement.categoryId },
-        });
+        const category = await this.standardsCache.getCategoryOrThrow(measurement.categoryId);
 
-        if (!category) {
-          throw new NotFoundException(`카테고리 ID ${measurement.categoryId}를 찾을 수 없습니다.`);
-        }
-
-        // 4. 등급 계산 (평가 기준이 있는 경우에만 수행)
-        // 4-1. EvaluationStandards에서 체중과 가장 가까운 내림값 찾기
-        const evaluationStandard = await queryRunner.manager
-          .createQueryBuilder(EvaluationStandards, 'es')
-          .leftJoinAndSelect('es.category', 'category')
-          .where('es.gender = :gender', { gender })
-          .andWhere('category.id = :categoryId', { categoryId: measurement.categoryId })
-          .andWhere('es.bodyWeight <= :bodyWeight', { bodyWeight })
-          .orderBy('es.bodyWeight', 'DESC')
-          .getOne();
+        const evaluationStandard = await this.standardsCache.getEvaluationStandardOrThrow(
+          gender,
+          measurement.categoryId,
+          bodyWeight,
+        );
 
         let score: number | null = null;
         let adjustedLevels: {
@@ -484,8 +464,11 @@ export class MembersService {
         // 평가 기준이 있는 경우에만 등급 계산 수행
         if (evaluationStandard) {
           try {
-            // 4-2. AgeCoefficients에서 가장 가까운 나이 계수 찾기 (카테고리별)
-            const ageCoefficient = await this.findNearestAgeCoefficient(gender, age, measurement.categoryId);
+            const ageCoefficient = await this.standardsCache.getNearestAgeCoefficientOrThrow(
+              gender,
+              measurement.categoryId,
+              age,
+            );
 
             const coefficient = parseFloat(ageCoefficient.coefficient);
 
@@ -706,41 +689,7 @@ export class MembersService {
 
     const gender = member.gender;
 
-    // 3. 이 회원 기록에서 사용된 categoryId 목록으로 evaluation_standards, age_coefficients IN 쿼리 1회씩 조회
-    const categoryIds = [...new Set(records.map((r) => r.category.id))];
-
-    const [allEvaluationStandards, allAgeCoefficients] = await Promise.all([
-      this.evaluationStandardsRepository
-        .createQueryBuilder('es')
-        .leftJoinAndSelect('es.category', 'category')
-        .where('es.gender = :gender', { gender })
-        .andWhere('category.id IN (:...categoryIds)', { categoryIds })
-        .getMany(),
-      this.ageCoefficientsRepository.find({
-        where: { gender, categoryId: In(categoryIds) },
-      }),
-    ]);
-
-    const standardsByCategory = new Map<number, EvaluationStandards[]>();
-    for (const es of allEvaluationStandards) {
-      const cid = es.category?.id;
-      if (cid == null) continue;
-      if (!standardsByCategory.has(cid)) standardsByCategory.set(cid, []);
-      standardsByCategory.get(cid)!.push(es);
-    }
-    for (const [, arr] of standardsByCategory) {
-      arr.sort((a, b) => (b.bodyWeight ?? 0) - (a.bodyWeight ?? 0));
-    }
-
-    const coefficientsByCategory = new Map<number, AgeCoefficients[]>();
-    for (const ac of allAgeCoefficients) {
-      const cid = ac.categoryId ?? 0;
-      if (!coefficientsByCategory.has(cid)) coefficientsByCategory.set(cid, []);
-      coefficientsByCategory.get(cid)!.push(ac);
-    }
-    for (const [, arr] of coefficientsByCategory) {
-      arr.sort((a, b) => a.age - b.age);
-    }
+    await this.standardsCache.ensureLoaded();
 
     // 4. 날짜 필터링이 있으면 세션별로 그룹화, 없으면 날짜별 그룹화
     if (date) {
@@ -803,13 +752,13 @@ export class MembersService {
           const bodyWeight = parseFloat(record.weightAtMeasured || member.weight);
           const age = record.ageAtMeasured || member.age;
           const measuredValue = parseFloat(record.value);
-          const evaluationStandard = this.findEvaluationStandardInMemory(
-            standardsByCategory,
+          const evaluationStandard = await this.standardsCache.getEvaluationStandardOrThrow(
+            gender,
             record.category.id,
             bodyWeight,
           );
-          const ageCoefficient = this.findNearestAgeCoefficientInMemory(
-            coefficientsByCategory,
+          const ageCoefficient = await this.standardsCache.getNearestAgeCoefficientOrThrow(
+            gender,
             record.category.id,
             age,
           );
@@ -969,13 +918,13 @@ export class MembersService {
             const bodyWeight = parseFloat(record.weightAtMeasured || member.weight);
             const age = record.ageAtMeasured || member.age;
             const measuredValue = parseFloat(record.value);
-            const evaluationStandard = this.findEvaluationStandardInMemory(
-              standardsByCategory,
+            const evaluationStandard = await this.standardsCache.getEvaluationStandardOrThrow(
+              gender,
               record.category.id,
               bodyWeight,
             );
-            const ageCoefficient = this.findNearestAgeCoefficientInMemory(
-              coefficientsByCategory,
+            const ageCoefficient = await this.standardsCache.getNearestAgeCoefficientOrThrow(
+              gender,
               record.category.id,
               age,
             );
